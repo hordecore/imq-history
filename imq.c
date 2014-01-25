@@ -79,6 +79,9 @@
  *              - Add check for skb->nf_queue_entry==NULL in imq_dev_xmit()
  *              - Also add better error checking for skb->nf_queue_entry usage
  *
+ *             2010/02/25 - (Jussi Kivilinna)
+ *              - Port to 2.6.33
+ *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
  *
