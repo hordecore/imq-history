@@ -95,8 +95,11 @@
  *              - Make IMQ multi-queue. Number of IMQ device queues can be
  *                increased with 'numqueues' module parameters. Default number
  *                of queues is 1, in other words by default IMQ works as
- *                single-queue device. Multi-queue selection is based on 
+ *                single-queue device. Multi-queue selection is based on
  *                IFB multi-queue patch by Changli Gao <xiaosuo@gmail.com>.
+ *
+ *             2011/03/18 - (Jussi Kivilinna)
+ *              - Port to 2.6.38
  *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
