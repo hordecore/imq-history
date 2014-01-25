@@ -101,6 +101,16 @@
  *             2011/03/18 - (Jussi Kivilinna)
  *              - Port to 2.6.38
  *
+ *             2011/07/12 - (syoder89@gmail.com)
+ *              - Crash fix that happens when the receiving interface has more
+ *                than one queue (add missing skb_set_queue_mapping in
+ *                imq_select_queue).
+ *
+ *             2011/07/26 - (Jussi Kivilinna)
+ *              - Add queue mapping checks for packets exiting IMQ.
+ *              - Port to 3.0
+ *              - Backport to 2.6.39
+ *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
  *
@@ -195,78 +205,10 @@ static int numdevs = CONFIG_IMQ_NUM_DEVS;
 static int numdevs = IMQ_MAX_DEVS;
 #endif
 
-#define IMQ_MAX_QUEUES 32
-static int numqueues = 1;
-
-/*static DEFINE_SPINLOCK(imq_nf_queue_lock);*/
-
 static struct net_device *imq_devs_cache[IMQ_MAX_DEVS];
 
-
-static struct net_device_stats *imq_get_stats(struct net_device *dev)
-{
-	return &dev->stats;
-}
-
-/* called for packets kfree'd in qdiscs at places other than enqueue */
-static void imq_skb_destructor(struct sk_buff *skb)
-{
-	struct nf_queue_entry *entry = skb->nf_queue_entry;
-
-	skb->nf_queue_entry = NULL;
-
-	if (entry) {
-		nf_queue_entry_release_refs(entry);
-		kfree(entry);
-	}
-
-	skb_restore_cb(skb); /* kfree backup */
-}
-
-static netdev_tx_t imq_dev_xmit(struct sk_buff *skb, struct net_device *dev)
-{
-	struct nf_queue_entry *entry = skb->nf_queue_entry;
-
-	skb->nf_queue_entry = NULL;
-	dev->trans_start = jiffies;
-
-	dev->stats.tx_bytes += skb->len;
-	dev->stats.tx_packets++;
-
-	if (entry == NULL) {
-		/* We don't know what is going on here.. packet is queued for
-		 * imq device, but (probably) not by us.
-		 *
-		 * If this packet was not send here by imq_nf_queue(), then
-		 * skb_save_cb() was not used and skb_free() should not show:
-		 *   WARNING: IMQ: kfree_skb: skb->cb_next:..
-		 * and/or
-		 *   WARNING: IMQ: kfree_skb: skb->nf_queue_entry...
-		 *
-		 * However if this message is shown, then IMQ is somehow broken
-		 * and you should report this to linuximq.net.
-		 */
-
-		/* imq_dev_xmit is black hole that eats all packets, report that
-		 * we eat this packet happily and increase dropped counters.
-		 */
-
-		dev->stats.tx_dropped++;
-		dev_kfree_skb(skb);
-
-		return NETDEV_TX_OK;
-	}
-
-	skb_restore_cb(skb); /* restore skb->cb */
-
-	skb->imq_flags = 0;
-	skb->destructor = NULL;
-
-	nf_reinject(entry, NF_ACCEPT);
-
-	return NETDEV_TX_OK;
-}
-
+#define IMQ_MAX_QUEUES 32
+static int numqueues = 1;
 static u32 imq_hashrnd;
 
 static inline __be16 pppoe_proto(const struct sk_buff *skb)
@@ -430,7 +372,95 @@ out:
 	if (unlikely(queue_index >= dev->real_num_tx_queues))
 		queue_index = (u16)((u32)queue_index % dev->real_num_tx_queues);
 
+	skb_set_queue_mapping(skb, queue_index);
 	return netdev_get_tx_queue(dev, queue_index);
+}
+
+static struct net_device_stats *imq_get_stats(struct net_device *dev)
+{
+	return &dev->stats;
+}
+
+/* called for packets kfree'd in qdiscs at places other than enqueue */
+static void imq_skb_destructor(struct sk_buff *skb)
+{
+	struct nf_queue_entry *entry = skb->nf_queue_entry;
+
+	skb->nf_queue_entry = NULL;
+
+	if (entry) {
+		nf_queue_entry_release_refs(entry);
+		kfree(entry);
+	}
+
+	skb_restore_cb(skb); /* kfree backup */
+}
+
+static void imq_done_check_queue_mapping(struct sk_buff *skb,
+					 struct net_device *dev)
+{
+	unsigned int queue_index;
+
+	/* Don't let queue_mapping be left too large after exiting IMQ */
+	if (likely(skb->dev != dev && skb->dev != NULL)) {
+		queue_index = skb_get_queue_mapping(skb);
+		if (unlikely(queue_index >= skb->dev->real_num_tx_queues)) {
+			queue_index = (u16)((u32)queue_index %
+						skb->dev->real_num_tx_queues);
+			skb_set_queue_mapping(skb, queue_index);
+		}
+	} else {
+		/* skb->dev was IMQ device itself or NULL, be on safe side and
+		 * just clear queue mapping.
+		 */
+		skb_set_queue_mapping(skb, 0);
+	}
+}
+
+static netdev_tx_t imq_dev_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct nf_queue_entry *entry = skb->nf_queue_entry;
+
+	skb->nf_queue_entry = NULL;
+	dev->trans_start = jiffies;
+
+	dev->stats.tx_bytes += skb->len;
+	dev->stats.tx_packets++;
+
+	if (unlikely(entry == NULL)) {
+		/* We don't know what is going on here.. packet is queued for
+		 * imq device, but (probably) not by us.
+		 *
+		 * If this packet was not send here by imq_nf_queue(), then
+		 * skb_save_cb() was not used and skb_free() should not show:
+		 *   WARNING: IMQ: kfree_skb: skb->cb_next:..
+		 * and/or
+		 *   WARNING: IMQ: kfree_skb: skb->nf_queue_entry...
+		 *
+		 * However if this message is shown, then IMQ is somehow broken
+		 * and you should report this to linuximq.net.
+		 */
+
+		/* imq_dev_xmit is black hole that eats all packets, report that
+		 * we eat this packet happily and increase dropped counters.
+		 */
+
+		dev->stats.tx_dropped++;
+		dev_kfree_skb(skb);
+
+		return NETDEV_TX_OK;
+	}
+
+	skb_restore_cb(skb); /* restore skb->cb */
+
+	skb->imq_flags = 0;
+	skb->destructor = NULL;
+
+	imq_done_check_queue_mapping(skb, dev);
+
+	nf_reinject(entry, NF_ACCEPT);
+
+	return NETDEV_TX_OK;
 }
 
 static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
@@ -442,6 +472,7 @@ static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
 	spinlock_t *root_lock;
 	int users, index;
 	int retval = -EINVAL;
+	unsigned int orig_queue_index;
 
 	index = entry->skb->imq_flags & IMQ_F_IFMASK;
 	if (unlikely(index > numdevs - 1)) {
@@ -499,10 +530,22 @@ static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
 	dev->stats.rx_bytes += skb->len;
 	dev->stats.rx_packets++;
 
+	if (!skb->dev) {
+		/* skb->dev == NULL causes problems, try the find cause. */
+		if (net_ratelimit()) {
+			dev_warn(&dev->dev,
+				 "received packet with skb->dev == NULL\n");
+			dump_stack();
+		}
+
+		skb->dev = dev;
+	}
+
 	/* Disables softirqs for lock below */
 	rcu_read_lock_bh();
 
 	/* Multi-queue selection */
+	orig_queue_index = skb_get_queue_mapping(skb);
 	txq = imq_select_queue(dev, skb);
 
 	q = rcu_dereference(txq->qdisc);
@@ -547,6 +590,7 @@ static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
 	}
 
 packet_not_eaten_by_imq_dev:
+	skb_set_queue_mapping(skb, orig_queue_index);
 	rcu_read_unlock_bh();
 
 	/* cloned? restore original */
