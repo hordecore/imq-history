@@ -135,6 +135,9 @@
  *              - Fixed GSO handling for 3.10, see imq_nf_queue() for comments.
  *              - Don't copy skb->cb_next when copying or cloning skbuffs.
  *
+ *             2013/09/16 - Jussi Kivilinna <jussi.kivilinna@iki.fi>
+ *              - Port to 3.11
+ *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
  *
