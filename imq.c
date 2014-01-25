@@ -109,7 +109,17 @@
  *             2011/07/26 - (Jussi Kivilinna)
  *              - Add queue mapping checks for packets exiting IMQ.
  *              - Port to 3.0
- *              - Backport to 2.6.39
+ *
+ *             2011/08/16 - (Jussi Kivilinna)
+ *              - Clear IFF_TX_SKB_SHARING flag that was added for linux 3.0.2
+ *
+ *             2011/11/03 - Germano Michel <germanomichel@gmail.com>
+ *              - Fix IMQ for net namespaces
+ *
+ *             2011/11/04 - Jussi Kivilinna <jussi.kivilinna@mbnet.fi>
+ *              - Port to 3.1
+ *              - Clean-up, move 'get imq device pointer by imqX name' to
+ *                separate function from imq_nf_queue().
  *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
@@ -463,6 +473,33 @@ static netdev_tx_t imq_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 	return NETDEV_TX_OK;
 }
 
+static struct net_device *get_imq_device_by_index(int index)
+{
+	struct net_device *dev = NULL;
+	struct net *net;
+	char buf[8];
+
+	/* get device by name and cache result */
+	snprintf(buf, sizeof(buf), "imq%d", index);
+
+	/* Search device from all namespaces. */
+	for_each_net(net) {
+		dev = dev_get_by_name(net, buf);
+		if (dev)
+			break;
+	}
+
+	if (WARN_ON_ONCE(dev == NULL)) {
+		/* IMQ device not found. Exotic config? */
+		return ERR_PTR(-ENODEV);
+	}
+
+	imq_devs_cache[index] = dev;
+	dev_put(dev);
+
+	return dev;
+}
+
 static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
 {
 	struct net_device *dev;
@@ -487,20 +524,11 @@ static int imq_nf_queue(struct nf_queue_entry *entry, unsigned queue_num)
 	/* check for imq device by index from cache */
 	dev = imq_devs_cache[index];
 	if (unlikely(!dev)) {
-		char buf[8];
-
-		/* get device by name and cache result */
-		snprintf(buf, sizeof(buf), "imq%d", index);
-		dev = dev_get_by_name(&init_net, buf);
-		if (unlikely(!dev)) {
-			/* not found ?!*/
-			BUG();
-			retval = -ENODEV;
+		dev = get_imq_device_by_index(index);
+		if (IS_ERR(dev)) {
+			retval = PTR_ERR(dev);
 			goto out;
 		}
-
-		imq_devs_cache[index] = dev;
-		dev_put(dev);
 	}
 
 	if (unlikely(!(dev->flags & IFF_UP))) {
@@ -633,14 +661,15 @@ static const struct net_device_ops imq_netdev_ops = {
 static void imq_setup(struct net_device *dev)
 {
 	dev->netdev_ops		= &imq_netdev_ops;
-	dev->type               = ARPHRD_VOID;
-	dev->mtu                = 16000;
-	dev->tx_queue_len       = 11000;
-	dev->flags              = IFF_NOARP;
-	dev->features           = NETIF_F_SG | NETIF_F_FRAGLIST |
+	dev->type		= ARPHRD_VOID;
+	dev->mtu		= 16000; /* too small? */
+	dev->tx_queue_len	= 11000; /* too big? */
+	dev->flags		= IFF_NOARP;
+	dev->features		= NETIF_F_SG | NETIF_F_FRAGLIST |
 				  NETIF_F_GSO | NETIF_F_HW_CSUM |
 				  NETIF_F_HIGHDMA;
-	dev->priv_flags		&= ~IFF_XMIT_DST_RELEASE;
+	dev->priv_flags		&= ~(IFF_XMIT_DST_RELEASE |
+				     IFF_TX_SKB_SHARING);
 }
 
 static int imq_validate(struct nlattr *tb[], struct nlattr *data[])
