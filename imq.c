@@ -138,6 +138,9 @@
  *             2013/09/16 - Jussi Kivilinna <jussi.kivilinna@iki.fi>
  *              - Port to 3.11
  *
+ *             2013/11/12 - Jussi Kivilinna <jussi.kivilinna@iki.fi>
+ *              - Port to 3.12
+ *
  *	       Also, many thanks to pablo Sebastian Greco for making the initial
  *	       patch and to those who helped the testing.
  *
